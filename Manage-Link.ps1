@@ -1,0 +1,225 @@
+param(
+    [string[]]$TargetPath,
+    [switch]$Restore,
+    [switch]$MakeLink,
+    [switch]$DryRun,
+    [switch]$Clean,
+    [string]$WorkingDirectory = (Get-Location).Path,
+    [string]$TargetSubDirectory
+)
+
+$Global:OriginMapPath = Join-Path -Path $WorkingDirectory -ChildPath ".origin"
+
+function Ensure-Elevation {
+    $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    if (-not $isAdmin) {
+        Write-Host "Elevation required. Prompting for admin..."
+        $quotedScript = '"' + $PSCommandPath + '"'
+        $argList = @()
+
+        if ($TargetPath) {
+            foreach ($p in $TargetPath) {
+                $clean = [Regex]::Replace($p, '\\+$', '')
+                $argList += "-TargetPath `"$clean`""
+            }
+        }
+
+        if ($Restore)       { $argList += "-Restore" }
+        if ($MakeLink)      { $argList += "-MakeLink" }
+        if ($DryRun)        { $argList += "-DryRun" }
+        if ($Clean)         { $argList += "-Clean" }
+        if ($TargetSubDirectory) { $argList += "-TargetSubDirectory `"$TargetSubDirectory`"" }
+
+        $argList += "-WorkingDirectory `"$($WorkingDirectory)`""
+
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = "powershell.exe"
+        $psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -File $quotedScript $($argList -join ' ')"
+        $psi.Verb = "runas"
+        try {
+            [System.Diagnostics.Process]::Start($psi) | Out-Null
+        } catch {
+            Write-Error "User cancelled the elevation prompt or an error occurred."
+        }
+        exit
+    }
+}
+
+Ensure-Elevation
+
+function Add-To-OriginMap {
+    param(
+        [string]$CurrentPath,
+        [string]$OriginalPath
+    )
+    $map = Load-OriginMap
+    if (-not $map.ContainsKey($CurrentPath)) {
+        "$CurrentPath|$OriginalPath" | Out-File -FilePath $Global:OriginMapPath -Encoding UTF8 -Append
+    }
+}
+
+function Load-OriginMap {
+    $map = @{}
+    if (Test-Path $Global:OriginMapPath) {
+        Get-Content $Global:OriginMapPath | ForEach-Object {
+            if ($_ -match "^(.*?)\|(.*)$") {
+                $map[$matches[1]] = $matches[2]
+            }
+        }
+    }
+    return $map
+}
+
+function Save-OriginMap {
+    param([hashtable]$Map)
+    $Map.GetEnumerator() | ForEach-Object {
+        "$($_.Key)|$($_.Value)"
+    } | Set-Content -Path $Global:OriginMapPath -Encoding UTF8
+}
+
+function Move-And-Link {
+    param([string]$Path)
+
+    $Path = [Regex]::Replace($Path, '\\+$', '')  # sanitize trailing backslash
+
+    try {
+        $OriginalPath = Resolve-Path -Path $Path -ErrorAction Stop
+        $Item = Get-Item -LiteralPath $OriginalPath -ErrorAction Stop
+        $FileName = $Item.Name
+
+        $TargetDir = $WorkingDirectory
+        if ($TargetSubDirectory) {
+            $TargetDir = Join-Path -Path $WorkingDirectory -ChildPath $TargetSubDirectory
+            if (!(Test-Path $TargetDir)) {
+                New-Item -Path $TargetDir -ItemType Directory | Out-Null
+            }
+        }
+
+        $NewPath = Join-Path -Path $TargetDir -ChildPath $FileName
+
+        if (Test-Path $NewPath) {
+            throw "Target '$FileName' already exists in destination directory."
+        }
+
+        if ($DryRun) {
+            Write-Host "Would move '$OriginalPath' to '$NewPath'"
+            Write-Host "Would create symlink at '$OriginalPath'"
+            Write-Host "Would record in .origin file"
+            return
+        }
+
+        Move-Item -Path $OriginalPath -Destination $NewPath
+
+        if ($Item.PSIsContainer) {
+            cmd /c mklink /D `"$OriginalPath`" `"$NewPath`" | Out-Null
+        } else {
+            cmd /c mklink `"$OriginalPath`" `"$NewPath`" | Out-Null
+        }
+
+        Add-To-OriginMap -CurrentPath $NewPath -OriginalPath $OriginalPath
+        Write-Host "Moved and linked '$FileName'. Origin recorded in .origin"
+
+    } catch {
+        $msg = "Error processing '$Path': $($_.Exception.Message)"
+        Write-Host "`n$msg" -ForegroundColor Red
+        "$msg`n" | Out-File -FilePath "$env:TEMP\move-symlink-error.log" -Encoding UTF8 -Append
+    }
+}
+
+function Restore-From-Origin {
+    $map = Load-OriginMap
+    $newMap = @{}
+
+    foreach ($pair in $map.GetEnumerator()) {
+        $linkedItem = $pair.Key
+        $originalPath = $pair.Value
+
+        try {
+            if ($DryRun) {
+                Write-Host "Would remove symlink '$originalPath'"
+                Write-Host "Would move '$linkedItem' back to '$originalPath'"
+                continue
+            }
+
+            if (Test-Path $originalPath) { Remove-Item $originalPath -Force -Recurse }
+            Move-Item -Path $linkedItem -Destination $originalPath
+            Write-Host "Restored '$originalPath'"
+        } catch {
+            $msg = "Restore error for '$originalPath': $($_.Exception.Message)"
+            Write-Host "`n$msg" -ForegroundColor Red
+            "$msg`n" | Out-File -FilePath "$env:TEMP\move-symlink-error.log" -Encoding UTF8 -Append
+            $newMap[$linkedItem] = $originalPath
+        }
+    }
+
+    Save-OriginMap -Map $newMap
+}
+
+function Make-Link-From-Origin {
+    $map = Load-OriginMap
+
+    foreach ($pair in $map.GetEnumerator()) {
+        $itemPath = $pair.Key
+        $originalPath = $pair.Value
+
+        try {
+            if ($DryRun) {
+                Write-Host "Would create symlink at '$originalPath' -> '$itemPath'"
+                continue
+            }
+
+            if (Test-Path $originalPath) { Remove-Item $originalPath -Force -Recurse }
+            if ((Get-Item -Path $itemPath).PSIsContainer) {
+                cmd /c mklink /D `"$originalPath`" `"$itemPath`" | Out-Null
+            } else {
+                cmd /c mklink `"$originalPath`" `"$itemPath`" | Out-Null
+            }
+            Write-Host "Linked '$originalPath' -> '$itemPath'"
+        } catch {
+            $msg = "Link error for '$originalPath': $($_.Exception.Message)"
+            Write-Host "`n$msg" -ForegroundColor Red
+            "$msg`n" | Out-File -FilePath "$env:TEMP\move-symlink-error.log" -Encoding UTF8 -Append
+        }
+    }
+}
+
+function Clean-OriginLinks {
+    $map = Load-OriginMap
+
+    foreach ($pair in $map.GetEnumerator()) {
+        try {
+            if (Test-Path $pair.Key) {
+                Remove-Item $pair.Key -Force -Recurse
+                Write-Host "Removed '$($pair.Key)'"
+            }
+        } catch {
+            $msg = "Cleanup error for '$($pair.Key)': $($_.Exception.Message)"
+            Write-Host "`n$msg" -ForegroundColor Red
+            "$msg`n" | Out-File -FilePath "$env:TEMP\move-symlink-error.log" -Encoding UTF8 -Append
+        }
+    }
+
+    if (Test-Path $Global:OriginMapPath) {
+        Remove-Item $Global:OriginMapPath -Force
+        Write-Host "Removed .origin file"
+    }
+}
+
+# Main logic
+if ($Restore) {
+    Restore-From-Origin
+} elseif ($MakeLink) {
+    Make-Link-From-Origin
+} elseif ($Clean) {
+    Clean-OriginLinks
+} elseif ($TargetPath) {
+    foreach ($p in $TargetPath) {
+        Move-And-Link -Path $p
+    }
+} else {
+    Write-Host "Please provide -TargetPath, -Restore, -MakeLink, or -Clean."
+}
+
+Write-Host "Press Enter to exit..."
+Read-Host | Out-Null
+
