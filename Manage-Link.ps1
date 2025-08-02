@@ -99,6 +99,31 @@ function Save-OriginMap {
     } | Set-Content -Path $Global:OriginMapPath -Encoding UTF8
 }
 
+function New-SafeSymlink {
+    param(
+        [Parameter(Mandatory=$true)][string]$LinkPath,
+        [Parameter(Mandatory=$true)][string]$TargetPath,
+        [Parameter(Mandatory=$true)][bool]$IsDirectory
+    )
+    try {
+        if ($IsDirectory) {
+            New-Item -ItemType SymbolicLink -Path $LinkPath -Target $TargetPath -Force -ErrorAction Stop | Out-Null
+        } else {
+            New-Item -ItemType SymbolicLink -Path $LinkPath -Target $TargetPath -Force -ErrorAction Stop | Out-Null
+        }
+        return
+    } catch {
+        # Fallback to cmd mklink for environments where New-Item symlink fails
+        $link = '"' + $LinkPath + '"'
+        $target = '"' + $TargetPath + '"'
+        $mklinkArgs = if ($IsDirectory) { "/c mklink /D $link $target" } else { "/c mklink $link $target" }
+        $proc = Start-Process -FilePath "cmd.exe" -ArgumentList $mklinkArgs -NoNewWindow -PassThru -Wait -ErrorAction SilentlyContinue
+        if (-not $proc -or $proc.ExitCode -ne 0) {
+            throw "Failed to create symlink: $LinkPath -> $TargetPath (exit code $($proc.ExitCode))"
+        }
+    }
+}
+
 function Move-And-Link {
     param([string]$Path)
 
@@ -132,11 +157,8 @@ function Move-And-Link {
 
         Move-Item -Path $OriginalPath -Destination $NewPath
 
-        if ($Item.PSIsContainer) {
-            cmd /c mklink /D `"$OriginalPath`" `"$NewPath`" | Out-Null
-        } else {
-            cmd /c mklink `"$OriginalPath`" `"$NewPath`" | Out-Null
-        }
+        $isDir = $Item.PSIsContainer
+        New-SafeSymlink -LinkPath $OriginalPath -TargetPath $NewPath -IsDirectory:$isDir
 
         Add-To-OriginMap -CurrentPath $NewPath -OriginalPath $OriginalPath
         Write-Host "Moved and linked '$FileName'. Origin recorded in .origin"
@@ -191,11 +213,9 @@ function Make-Link-From-Origin {
             }
 
             if (Test-Path $originalPath) { Remove-Item $originalPath -Force -Recurse }
-            if ((Get-Item -Path $itemPath).PSIsContainer) {
-                cmd /c mklink /D `"$originalPath`" `"$itemPath`" | Out-Null
-            } else {
-                cmd /c mklink `"$originalPath`" `"$itemPath`" | Out-Null
-            }
+            $isDir = (Get-Item -Path $itemPath).PSIsContainer
+            New-SafeSymlink -LinkPath $originalPath -TargetPath $itemPath -IsDirectory:$isDir
+
             Write-Host "Linked '$originalPath' -> '$itemPath'"
         } catch {
             $msg = "Link error for '$originalPath': $($_.Exception.Message)"
