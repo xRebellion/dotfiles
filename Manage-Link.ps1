@@ -21,6 +21,7 @@ param(
 )
 
 $Global:OriginMapPath = Join-Path -Path $WorkingDirectory -ChildPath ".origin"
+$Global:BackupRootPath = Join-Path -Path $WorkingDirectory -ChildPath ".backups"
 
 function Ensure-Elevation {
     $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -64,6 +65,12 @@ Ensure-Elevation
 function Ensure-OriginFile {
     if (!(Test-Path $Global:OriginMapPath)) {
         New-Item -Path $Global:OriginMapPath -ItemType File -Force | Out-Null
+    }
+}
+
+function Ensure-BackupRoot {
+    if (!(Test-Path $Global:BackupRootPath)) {
+        New-Item -Path $Global:BackupRootPath -ItemType Directory -Force | Out-Null
     }
 }
 
@@ -129,6 +136,50 @@ function New-SafeSymlink {
     }
 }
 
+function Get-BackupPath {
+    param(
+        [Parameter(Mandatory=$true)][string]$SourcePath
+    )
+    Ensure-BackupRoot
+    $timestamp = (Get-Date).ToString("yyyyMMdd_HHmmss")
+    $name = Split-Path -Path $SourcePath -Leaf
+    $backupDir = Join-Path -Path $Global:BackupRootPath -ChildPath $timestamp
+    # Ensure unique folder per operation timestamp
+    if (!(Test-Path $backupDir)) {
+        New-Item -Path $backupDir -ItemType Directory -Force | Out-Null
+    }
+    return (Join-Path -Path $backupDir -ChildPath $name)
+}
+
+function Backup-Item {
+    param(
+        [Parameter(Mandatory=$true)][string]$SourcePath
+    )
+    $dest = Get-BackupPath -SourcePath $SourcePath
+    if ($DryRun) {
+        Write-Host "Would backup '$SourcePath' -> '$dest'"
+        return $dest
+    }
+
+    try {
+        $item = Get-Item -LiteralPath $SourcePath -ErrorAction Stop
+        if ($item.PSIsContainer) {
+            Copy-Item -LiteralPath $SourcePath -Destination $dest -Recurse -Force -ErrorAction Stop
+        } else {
+            $destDir = Split-Path -Path $dest -Parent
+            if (!(Test-Path $destDir)) {
+                New-Item -Path $destDir -ItemType Directory -Force | Out-Null
+            }
+            Copy-Item -LiteralPath $SourcePath -Destination $dest -Force -ErrorAction Stop
+        }
+        Write-Host "Backup created: '$dest'"
+        return $dest
+    } catch {
+        Write-Host "Backup failed for '$SourcePath': $($_.Exception.Message)" -ForegroundColor Yellow
+        return $null
+    }
+}
+
 function Move-And-Link {
     param([string]$Path)
 
@@ -154,11 +205,15 @@ function Move-And-Link {
         }
 
         if ($DryRun) {
+            Write-Host "Would backup original at '$OriginalPath'"
             Write-Host "Would move '$OriginalPath' to '$NewPath'"
             Write-Host "Would create symlink at '$OriginalPath'"
             Write-Host "Would record in .origin file"
             return
         }
+
+        # Backup original before moving
+        Backup-Item -SourcePath $OriginalPath
 
         Move-Item -Path $OriginalPath -Destination $NewPath
 
@@ -185,12 +240,26 @@ function Restore-From-Origin {
 
         try {
             if ($DryRun) {
-                Write-Host "Would remove symlink '$originalPath'"
+                if (Test-Path $originalPath) {
+                    Write-Host "Would backup existing original '$originalPath'"
+                    Write-Host "Would remove existing original '$originalPath'"
+                }
+                Write-Host "Would backup linked item '$linkedItem'"
                 Write-Host "Would move '$linkedItem' back to '$originalPath'"
                 continue
             }
 
-            if (Test-Path $originalPath) { Remove-Item $originalPath -Force -Recurse }
+            # If an item exists at the original path, back it up then remove it
+            if (Test-Path $originalPath) {
+                Backup-Item -SourcePath $originalPath | Out-Null
+                Remove-Item $originalPath -Force -Recurse
+            }
+
+            # Backup the current linked item (the moved target) before restore
+            if (Test-Path $linkedItem) {
+                Backup-Item -SourcePath $linkedItem | Out-Null
+            }
+
             Move-Item -Path $linkedItem -Destination $originalPath
             Write-Host "Restored '$originalPath'"
         } catch {
@@ -213,11 +282,18 @@ function Make-Link-From-Origin {
 
         try {
             if ($DryRun) {
+                if (Test-Path $originalPath) {
+                    Write-Host "Would backup existing original '$originalPath'"
+                    Write-Host "Would remove existing original '$originalPath'"
+                }
                 Write-Host "Would create symlink at '$originalPath' -> '$itemPath'"
                 continue
             }
 
-            if (Test-Path $originalPath) { Remove-Item $originalPath -Force -Recurse }
+            if (Test-Path $originalPath) {
+                Backup-Item -SourcePath $originalPath | Out-Null
+                Remove-Item $originalPath -Force -Recurse
+            }
             $isDir = (Get-Item -Path $itemPath).PSIsContainer
             New-SafeSymlink -LinkPath $originalPath -TargetPath $itemPath -IsDirectory:$isDir
 
