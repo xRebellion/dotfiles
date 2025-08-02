@@ -1,10 +1,22 @@
+[CmdletBinding(PositionalBinding=$false, DefaultParameterSetName='Move')]
 param(
+    [Parameter(ParameterSetName='Move')]
     [string[]]$TargetPath,
+
+    [Parameter(ParameterSetName='Restore')]
     [switch]$Restore,
-    [switch]$MakeLink,
-    [switch]$DryRun,
+
+    [Parameter(ParameterSetName='Link')]
+    [Alias('MakeLink')]
+    [switch]$Link,
+
+    [Parameter(ParameterSetName='Clean')]
     [switch]$Clean,
+
+    [switch]$DryRun,
+
     [string]$WorkingDirectory = (Get-Location).Path,
+
     [string]$TargetSubDirectory
 )
 
@@ -17,20 +29,22 @@ function Ensure-Elevation {
         $quotedScript = '"' + $PSCommandPath + '"'
         $argList = @()
 
-        if ($TargetPath) {
+        if ($PSCmdlet.ParameterSetName -eq 'Move' -and $TargetPath) {
             foreach ($p in $TargetPath) {
                 $clean = [Regex]::Replace($p, '\\+$', '')
                 $argList += "-TargetPath `"$clean`""
             }
         }
 
-        if ($Restore)       { $argList += "-Restore" }
-        if ($MakeLink)      { $argList += "-MakeLink" }
-        if ($DryRun)        { $argList += "-DryRun" }
-        if ($Clean)         { $argList += "-Clean" }
-        if ($TargetSubDirectory) { $argList += "-TargetSubDirectory `"$TargetSubDirectory`"" }
+        switch ($PSCmdlet.ParameterSetName) {
+            'Restore' { $argList += "-Restore" }
+            'Link'    { $argList += "-Link" }
+            'Clean'   { $argList += "-Clean" }
+        }
 
-        $argList += "-WorkingDirectory `"$WorkingDirectory`""
+        if ($DryRun)              { $argList += "-DryRun" }
+        if ($TargetSubDirectory)  { $argList += "-TargetSubDirectory `"$TargetSubDirectory`"" }
+        if ($WorkingDirectory)    { $argList += "-WorkingDirectory `"$WorkingDirectory`"" }
 
         $psi = New-Object System.Diagnostics.ProcessStartInfo
         $psi.FileName = "powershell.exe"
@@ -214,28 +228,29 @@ function Clean-OriginLinks {
 }
 
 # Main logic
-if ($Restore) {
-    Restore-From-Origin
-} elseif ($MakeLink) {
-    Make-Link-From-Origin
-} elseif ($Clean) {
-    Clean-OriginLinks
-} elseif ($TargetPath) {
-    foreach ($p in $TargetPath) {
-        Move-And-Link -Path $p
+switch ($PSCmdlet.ParameterSetName) {
+    'Restore' { Restore-From-Origin }
+    'Link'    { Make-Link-From-Origin }
+    'Clean'   { Clean-OriginLinks }
+    default {
+        if ($TargetPath) {
+            foreach ($p in $TargetPath) {
+                Move-And-Link -Path $p
+            }
+        } else {
+            Write-Host "Please provide -TargetPath, -Restore, -Link, or -Clean."
+        }
     }
-} else {
-    Write-Host "Please provide -TargetPath, -Restore, -MakeLink, or -Clean."
 }
 
 Write-Host "Args:"
+Write-Host "ParameterSet: $($PSCmdlet.ParameterSetName)"
 Write-Host "TargetPath: $TargetPath"
 Write-Host "TargetSubDirectory: $TargetSubDirectory"
 Write-Host "Restore: $Restore"
-Write-Host "MakeLink: $MakeLink"
+Write-Host "Link: $Link"
 Write-Host "Clean: $Clean"
 Write-Host "DryRun: $DryRun"
 Write-Host "WorkingDirectory: $WorkingDirectory"
 Write-Host "Press Enter to exit..."
 Read-Host | Out-Null
-
