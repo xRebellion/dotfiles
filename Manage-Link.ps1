@@ -30,7 +30,7 @@ function Ensure-Elevation {
         if ($Clean)         { $argList += "-Clean" }
         if ($TargetSubDirectory) { $argList += "-TargetSubDirectory `"$TargetSubDirectory`"" }
 
-        $argList += "-WorkingDirectory `"$($WorkingDirectory)`""
+        $argList += "-WorkingDirectory `"$WorkingDirectory`""
 
         $psi = New-Object System.Diagnostics.ProcessStartInfo
         $psi.FileName = "powershell.exe"
@@ -47,11 +47,18 @@ function Ensure-Elevation {
 
 Ensure-Elevation
 
+function Ensure-OriginFile {
+    if (!(Test-Path $Global:OriginMapPath)) {
+        New-Item -Path $Global:OriginMapPath -ItemType File -Force | Out-Null
+    }
+}
+
 function Add-To-OriginMap {
     param(
         [string]$CurrentPath,
         [string]$OriginalPath
     )
+    Ensure-OriginFile
     $map = Load-OriginMap
     if (-not $map.ContainsKey($CurrentPath)) {
         "$CurrentPath|$OriginalPath" | Out-File -FilePath $Global:OriginMapPath -Encoding UTF8 -Append
@@ -72,6 +79,7 @@ function Load-OriginMap {
 
 function Save-OriginMap {
     param([hashtable]$Map)
+    Ensure-OriginFile
     $Map.GetEnumerator() | ForEach-Object {
         "$($_.Key)|$($_.Value)"
     } | Set-Content -Path $Global:OriginMapPath -Encoding UTF8
@@ -80,7 +88,7 @@ function Save-OriginMap {
 function Move-And-Link {
     param([string]$Path)
 
-    $Path = [Regex]::Replace($Path, '\\+$', '')  # sanitize trailing backslash
+    $Path = [Regex]::Replace($Path, '\\+$', '')
 
     try {
         $OriginalPath = Resolve-Path -Path $Path -ErrorAction Stop
@@ -220,6 +228,14 @@ if ($Restore) {
     Write-Host "Please provide -TargetPath, -Restore, -MakeLink, or -Clean."
 }
 
+Write-Host "Args:"
+Write-Host "TargetPath: $TargetPath"
+Write-Host "TargetSubDirectory: $TargetSubDirectory"
+Write-Host "Restore: $Restore"
+Write-Host "MakeLink: $MakeLink"
+Write-Host "Clean: $Clean"
+Write-Host "DryRun: $DryRun"
+Write-Host "WorkingDirectory: $WorkingDirectory"
 Write-Host "Press Enter to exit..."
 Read-Host | Out-Null
 
