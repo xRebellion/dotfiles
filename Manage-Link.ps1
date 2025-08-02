@@ -1,6 +1,6 @@
 [CmdletBinding(PositionalBinding=$false, DefaultParameterSetName='Move')]
 param(
-    [Parameter(ParameterSetName='Move')]
+    [Parameter(ParameterSetName='Move', Position=0, ValueFromRemainingArguments=$true)]
     [string[]]$TargetPath,
 
     [Parameter(ParameterSetName='Restore')]
@@ -94,6 +94,11 @@ function Load-OriginMap {
 function Save-OriginMap {
     param([hashtable]$Map)
     Ensure-OriginFile
+    if ($Map.Count -eq 0) {
+        # Explicitly clear the file when no entries remain
+        Set-Content -Path $Global:OriginMapPath -Value '' -NoNewline
+        return
+    }
     $Map.GetEnumerator() | ForEach-Object {
         "$($_.Key)|$($_.Value)"
     } | Set-Content -Path $Global:OriginMapPath -Encoding UTF8
