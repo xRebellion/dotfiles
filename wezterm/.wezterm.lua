@@ -1,0 +1,1 @@
+C:/Users/Daniel/AppData/Local/nvim/.wezterm.lua
