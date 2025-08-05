@@ -10,3 +10,12 @@ vim.keymap.set("n", "<F5>", "<cmd>DapNew<cr>", { desc = "Debug Spring Applicatio
 vim.keymap.set("n", "<C-F5>", function()
   Snacks.terminal.open("mvn spring-boot:run", { win = { style = "split" } })
 end, { desc = "Run Spring Application" })
+vim.keymap.set("n", "<leader>fy", function()
+  vim.fn.setreg("+", vim.fn.expand("%:p"))
+  vim.notify("Copied absolute path to clipboard", vim.log.levels.INFO)
+end, { desc = "Copy absolute file path" })
+
+vim.keymap.set("n", "<leader>fY", function()
+  vim.fn.setreg("+", vim.fn.expand("%:."))
+  vim.notify("Copied relative path to clipboard", vim.log.levels.INFO)
+end, { desc = "Copy relative file path" })

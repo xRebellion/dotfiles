@@ -16,6 +16,9 @@ return {
           },
         },
       },
+      matcher = {
+        frecency = true,
+      },
     },
   },
 }

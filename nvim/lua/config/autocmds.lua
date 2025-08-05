@@ -27,4 +27,10 @@ vim.api.nvim_create_user_command("ClearShada", function()
     vim.print("Successfully deleted all temporary shada files")
   end
 end, { desc = "Clears all the .tmp shada files" })
-require("wezterm").set_win_title("Neovim")
+vim.api.nvim_create_autocmd("FileType", {
+  pattern = "dbui",
+  callback = function()
+    vim.keymap.del("n", "<C-j>", { buffer = true })
+    vim.keymap.del("n", "<C-k>", { buffer = true })
+  end,
+})
