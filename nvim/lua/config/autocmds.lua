@@ -34,3 +34,17 @@ vim.api.nvim_create_autocmd("FileType", {
     vim.keymap.del("n", "<C-k>", { buffer = true })
   end,
 })
+
+-- https://github.com/LazyVim/LazyVim/discussions/141
+-- Autoformat setting
+local set_autoformat = function(pattern, bool_val)
+  vim.api.nvim_create_autocmd({ "FileType" }, {
+    pattern = pattern,
+    callback = function()
+      vim.b.autoformat = bool_val
+    end,
+  })
+end
+
+set_autoformat({ "html" }, false)
+set_autoformat({ "js" }, false)
