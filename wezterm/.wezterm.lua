@@ -59,6 +59,16 @@ local padding = {
 	top = 0,
 	bottom = 0,
 }
+config.keys = {
+	{
+		key = " ",
+		mods = "CTRL",
+		action = wezterm.action.SendKey({
+			key = " ",
+			mods = "CTRL",
+		}),
+	},
+}
 wezterm.on("user-var-changed", function(window, pane, name, value)
 	if name == "NVIM_ENTER" then
 		local overrides = window:get_config_overrides() or {}
