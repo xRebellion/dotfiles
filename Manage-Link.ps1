@@ -1,28 +1,44 @@
 [CmdletBinding(PositionalBinding=$false, DefaultParameterSetName='Move')]
 param(
-    [Parameter(ParameterSetName='Move', Position=0, ValueFromRemainingArguments=$true)]
-    [string[]]$TargetPath,
+    # --- Parameter Set: CreateLink ---
+    # Creates a symlink at a specified path pointing to a source file/folder.
+    [Parameter(ParameterSetName='Move', Position=0)]
+    [Parameter(ParameterSetName='CreateLink', Position=0)]
+    [string]$Source,
 
+    [Parameter(ParameterSetName='CreateLink')]
+    [string]$Link,
+
+    # --- Parameter Set: Restore ---
+    # Moves items back to their original locations from the backup.
     [Parameter(ParameterSetName='Restore')]
     [switch]$Restore,
 
-    [Parameter(ParameterSetName='Link')]
+    # --- Parameter Set: Relink ---
+    # Re-creates all symlinks based on the .origin file.
+    [Parameter(ParameterSetName='Relink')]
     [Alias('MakeLink')]
-    [switch]$Link,
+    [switch]$Relink,
 
+    # --- Parameter Set: Clean ---
+    # Removes all moved items and the .origin file.
     [Parameter(ParameterSetName='Clean')]
     [switch]$Clean,
 
+    # --- Global Parameters (apply to all sets) ---
     [switch]$DryRun,
-
     [string]$WorkingDirectory = (Get-Location).Path,
-
     [string]$TargetSubDirectory
 )
 
+# --- Global Variables ---
 $Global:OriginMapPath = Join-Path -Path $WorkingDirectory -ChildPath ".origin"
 $Global:BackupRootPath = Join-Path -Path $WorkingDirectory -ChildPath ".backups"
 
+#------------------------------------------------------------------------------------
+
+# Checks if the script is running with administrator privileges.
+# If not, it relaunches itself in a new, elevated window, passing along all the original arguments.
 function Ensure-Elevation {
     $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
     if (-not $isAdmin) {
@@ -30,22 +46,26 @@ function Ensure-Elevation {
         $quotedScript = '"' + $PSCommandPath + '"'
         $argList = @()
 
-        if ($PSCmdlet.ParameterSetName -eq 'Move' -and $TargetPath) {
-            foreach ($p in $TargetPath) {
+        if ($PSCmdlet.ParameterSetName -eq 'Move' -and $Source) {
+            foreach ($p in $Source) {
                 $clean = [Regex]::Replace($p, '\\+$', '')
-                $argList += "-TargetPath `"$clean`""
+                $argList += "-Source `"$clean`""
             }
         }
 
         switch ($PSCmdlet.ParameterSetName) {
-            'Restore' { $argList += "-Restore" }
-            'Link'    { $argList += "-Link" }
-            'Clean'   { $argList += "-Clean" }
+            'Restore'    { $argList += "-Restore" }
+            'Relink'     { $argList += "-Relink" }
+            'Clean'      { $argList += "-Clean" }
+            'CreateLink' {
+                $argList += "-Source `"$Source`""
+                $argList += "-Link `"$Link`""
+            }
         }
 
-        if ($DryRun)              { $argList += "-DryRun" }
-        if ($TargetSubDirectory)  { $argList += "-TargetSubDirectory `"$TargetSubDirectory`"" }
-        if ($WorkingDirectory)    { $argList += "-WorkingDirectory `"$WorkingDirectory`"" }
+        if ($DryRun)             { $argList += "-DryRun" }
+        if ($TargetSubDirectory) { $argList += "-TargetSubDirectory `"$TargetSubDirectory`"" }
+        if ($WorkingDirectory)   { $argList += "-WorkingDirectory `"$WorkingDirectory`"" }
 
         $psi = New-Object System.Diagnostics.ProcessStartInfo
         $psi.FileName = "powershell.exe"
@@ -61,48 +81,94 @@ function Ensure-Elevation {
 }
 
 Ensure-Elevation
+Set-Location -Path $WorkingDirectory
 
+#------------------------------------------------------------------------------------
+
+# Checks for the `.origin` file in the current directory and creates it if it doesn't exist.
+# This file stores the mapping between moved files and their original locations.
 function Ensure-OriginFile {
     if (!(Test-Path $Global:OriginMapPath)) {
         New-Item -Path $Global:OriginMapPath -ItemType File -Force | Out-Null
     }
 }
 
+#------------------------------------------------------------------------------------
+
+# Checks for the `.backups` directory in the current directory and creates it if it doesn't exist.
+# This directory stores timestamped backups of items before they are moved or modified.
 function Ensure-BackupRoot {
     if (!(Test-Path $Global:BackupRootPath)) {
         New-Item -Path $Global:BackupRootPath -ItemType Directory -Force | Out-Null
     }
 }
 
+#------------------------------------------------------------------------------------
+
+# Adds a mapping to the `.origin` file.
+# It converts full home directory paths to tilde `~` notation for portability.
+# param(CurrentPath): The path to the actual file/folder.
+# param(OriginalPath): The path to the symbolic link.
 function Add-To-OriginMap {
     param(
         [string]$CurrentPath,
         [string]$OriginalPath
     )
+    $userHome = $env:USERPROFILE
+    $processedCurrentPath = $CurrentPath
+    $processedOriginalPath = $OriginalPath
+
+    if ($processedCurrentPath.StartsWith($userHome, [System.StringComparison]::OrdinalIgnoreCase)) {
+        $processedCurrentPath = '~' + $processedCurrentPath.Substring($userHome.Length)
+    }
+
+    if ($processedOriginalPath.StartsWith($userHome, [System.StringComparison]::OrdinalIgnoreCase)) {
+        $processedOriginalPath = '~' + $processedOriginalPath.Substring($userHome.Length)
+    }
+
     Ensure-OriginFile
     $map = Load-OriginMap
     if (-not $map.ContainsKey($CurrentPath)) {
-        "$CurrentPath|$OriginalPath" | Out-File -FilePath $Global:OriginMapPath -Encoding UTF8 -Append
+        "$processedCurrentPath|$processedOriginalPath" | Out-File -FilePath $Global:OriginMapPath -Encoding UTF8 -Append
     }
 }
 
+#------------------------------------------------------------------------------------
+
+# Reads and parses the `.origin` file.
+# It expands any tilde `~` paths into full, absolute paths so the rest of the script can use them.
+# returns: A hashtable of all mappings, e.g., @{'C:\dotfiles\file.txt' = 'C:\docs\file.txt'}.
 function Load-OriginMap {
     $map = @{}
     if (Test-Path $Global:OriginMapPath) {
         Get-Content $Global:OriginMapPath | ForEach-Object {
             if ($_ -match "^(.*?)\|(.*)$") {
-                $map[$matches[1]] = $matches[2]
+                $keyPath = $matches[1]
+                $valuePath = $matches[2]
+
+                if ($keyPath.StartsWith('~')) {
+                    $keyPath = Resolve-Path -Path $keyPath | Select-Object -ExpandProperty Path
+                }
+                if ($valuePath.StartsWith('~')) {
+                    $valuePath = Resolve-Path -Path $valuePath | Select-Object -ExpandProperty Path
+                }
+                
+                $map[$keyPath] = $valuePath
             }
         }
     }
     return $map
 }
 
+#------------------------------------------------------------------------------------
+
+# Overwrites the `.origin` file with the contents of a given hashtable.
+# This is mainly used after a restore operation where some items may have failed and need to be removed from the map.
+# param(Map): A hashtable containing the mappings to save.
 function Save-OriginMap {
     param([hashtable]$Map)
     Ensure-OriginFile
     if ($Map.Count -eq 0) {
-        # Explicitly clear the file when no entries remain
         Set-Content -Path $Global:OriginMapPath -Value '' -NoNewline
         return
     }
@@ -111,6 +177,13 @@ function Save-OriginMap {
     } | Set-Content -Path $Global:OriginMapPath -Encoding UTF8
 }
 
+#------------------------------------------------------------------------------------
+
+# Safely creates a symbolic link, handling both files and directories.
+# It first attempts to use the modern PowerShell `New-Item` cmdlet and falls back to the legacy `cmd.exe mklink` command if that fails.
+# param(LinkPath): The path where the symbolic link should be created.
+# param(TargetPath): The path that the link should point to.
+# param(IsDirectory): A boolean, $true if the target is a directory.
 function New-SafeSymlink {
     param(
         [Parameter(Mandatory=$true)][string]$LinkPath,
@@ -125,7 +198,6 @@ function New-SafeSymlink {
         }
         return
     } catch {
-        # Fallback to cmd mklink for environments where New-Item symlink fails
         $link = '"' + $LinkPath + '"'
         $target = '"' + $TargetPath + '"'
         $mklinkArgs = if ($IsDirectory) { "/c mklink /D $link $target" } else { "/c mklink $link $target" }
@@ -136,6 +208,11 @@ function New-SafeSymlink {
     }
 }
 
+#------------------------------------------------------------------------------------
+
+# Generates a unique, timestamped path inside the `.backups` directory for an item.
+# param(SourcePath): The path of the item to be backed up.
+# returns: The full destination path for the backup.
 function Get-BackupPath {
     param(
         [Parameter(Mandatory=$true)][string]$SourcePath
@@ -144,13 +221,16 @@ function Get-BackupPath {
     $timestamp = (Get-Date).ToString("yyyyMMdd_HHmmss")
     $name = Split-Path -Path $SourcePath -Leaf
     $backupDir = Join-Path -Path $Global:BackupRootPath -ChildPath $timestamp
-    # Ensure unique folder per operation timestamp
     if (!(Test-Path $backupDir)) {
         New-Item -Path $backupDir -ItemType Directory -Force | Out-Null
     }
     return (Join-Path -Path $backupDir -ChildPath $name)
 }
 
+#------------------------------------------------------------------------------------
+
+# Creates a safe backup of a file or folder by copying it to the `.backups` directory.
+# param(SourcePath): The path of the item to back up.
 function Backup-Item {
     param(
         [Parameter(Mandatory=$true)][string]$SourcePath
@@ -180,6 +260,11 @@ function Backup-Item {
     }
 }
 
+#------------------------------------------------------------------------------------
+
+# The main logic for the default "move" operation.
+# It moves a target item to the working directory, creates a symlink at its original location, and records the action in the `.origin` file.
+# param(Path): The path to the file or folder to move and link.
 function Move-And-Link {
     param([string]$Path)
 
@@ -211,15 +296,11 @@ function Move-And-Link {
             Write-Host "Would record in .origin file"
             return
         }
-
-        # Backup original before moving
+        
         Backup-Item -SourcePath $OriginalPath
-
         Move-Item -Path $OriginalPath -Destination $NewPath
-
         $isDir = $Item.PSIsContainer
         New-SafeSymlink -LinkPath $OriginalPath -TargetPath $NewPath -IsDirectory:$isDir
-
         Add-To-OriginMap -CurrentPath $NewPath -OriginalPath $OriginalPath
         Write-Host "Moved and linked '$FileName'. Origin recorded in .origin"
 
@@ -230,6 +311,10 @@ function Move-And-Link {
     }
 }
 
+#------------------------------------------------------------------------------------
+
+# Handles the `-Restore` operation.
+# It reads the `.origin` map and moves every tracked item from the working directory back to its original location, replacing the symlink.
 function Restore-From-Origin {
     $map = Load-OriginMap
     $newMap = @{}
@@ -249,13 +334,11 @@ function Restore-From-Origin {
                 continue
             }
 
-            # If an item exists at the original path, back it up then remove it
             if (Test-Path $originalPath) {
                 Backup-Item -SourcePath $originalPath | Out-Null
                 Remove-Item $originalPath -Force -Recurse
             }
 
-            # Backup the current linked item (the moved target) before restore
             if (Test-Path $linkedItem) {
                 Backup-Item -SourcePath $linkedItem | Out-Null
             }
@@ -273,6 +356,10 @@ function Restore-From-Origin {
     Save-OriginMap -Map $newMap
 }
 
+#------------------------------------------------------------------------------------
+
+# Handles the `-Relink` operation.
+# It reads the `.origin` map and re-creates all symlinks. This is useful if links are broken or were accidentally deleted.
 function Make-Link-From-Origin {
     $map = Load-OriginMap
 
@@ -306,6 +393,10 @@ function Make-Link-From-Origin {
     }
 }
 
+#------------------------------------------------------------------------------------
+
+# Handles the `-Clean` operation.
+# This is a destructive action that removes all files tracked in `.origin` from the working directory, and then deletes the `.origin` file itself.
 function Clean-OriginLinks {
     $map = Load-OriginMap
 
@@ -328,30 +419,81 @@ function Clean-OriginLinks {
     }
 }
 
-# Main logic
-switch ($PSCmdlet.ParameterSetName) {
-    'Restore' { Restore-From-Origin }
-    'Link'    { Make-Link-From-Origin }
-    'Clean'   { Clean-OriginLinks }
-    default {
-        if ($TargetPath) {
-            foreach ($p in $TargetPath) {
-                Move-And-Link -Path $p
-            }
-        } else {
-            Write-Host "Please provide -TargetPath, -Restore, -Link, or -Clean."
+#------------------------------------------------------------------------------------
+
+# Handles the `-Link` operation for creating a single, manual link.
+# It creates a symlink at the `-Link` path pointing to the `-Source` path and records the mapping in the `.origin` file.
+function Create-Manual-Link {
+    try {
+        $sourceFullPath = Resolve-Path -LiteralPath $Source -ErrorAction Stop
+        $sourceItem = Get-Item -LiteralPath $sourceFullPath -ErrorAction Stop
+
+        if ($DryRun) {
+            Write-Host "Would create symlink at '$Link' pointing to '$sourceFullPath'"
+            return
         }
+        
+        $linkParentDir = Split-Path -Path $Link -Parent
+        if ($linkParentDir -and (-not (Test-Path $linkParentDir))) {
+            Write-Host "Creating parent directory: '$linkParentDir'"
+            New-Item -Path $linkParentDir -ItemType Directory -Force | Out-Null
+        }
+
+        if (Test-Path $Link -PathType Any) {
+            Write-Host "Item already exists at link destination '$Link'. Backing it up."
+            Backup-Item -SourcePath $Link | Out-Null
+            Remove-Item -LiteralPath $Link -Force -Recurse
+        }
+
+        $isDir = $sourceItem.PSIsContainer
+        New-SafeSymlink -LinkPath $Link -TargetPath $sourceFullPath -IsDirectory:$isDir
+        Write-Host "Successfully created link: '$Link' -> '$sourceFullPath'"
+
+        Add-To-OriginMap -CurrentPath $sourceFullPath -OriginalPath $Link
+        Write-Host "Link mapping has been added to the .origin file." -ForegroundColor Green
+        Write-Host "WARNING: -Restore or -Clean will now affect the original source file '$sourceFullPath'." -ForegroundColor Yellow
+
+    } catch {
+        $msg = "Error creating link: $($_.Exception.Message)"
+        Write-Host "`n$msg" -ForegroundColor Red
+        "$msg`n" | Out-File -FilePath "$env:TEMP\move-symlink-error.log" -Encoding UTF8 -Append
     }
 }
 
-Write-Host "Args:"
+#------------------------------------------------------------------------------------
+# --- Main Script Logic ---
+# Selects the appropriate function to run based on the command-line parameters.
+#------------------------------------------------------------------------------------
+switch ($PSCmdlet.ParameterSetName) {
+    'CreateLink' { Create-Manual-Link }
+    'Restore'    { Restore-From-Origin }
+    'Relink'     { Make-Link-From-Origin }
+    'Clean'      { Clean-OriginLinks }
+    'Move' {
+        if ($Source) {
+            foreach ($p in $Source) {
+                Move-And-Link -Path $p
+            }
+        } else {
+            Write-Host "Please provide a command: -Move, -CreateLink, -Restore, -Relink, or -Clean."
+        }
+    }
+    default {
+         Write-Host "Please provide a command: -Move, -CreateLink, -Restore, -Relink, or -Clean."
+    }
+}
+
+
+Write-Host "`n--- Script Execution Details ---"
 Write-Host "ParameterSet: $($PSCmdlet.ParameterSetName)"
-Write-Host "TargetPath: $TargetPath"
-Write-Host "TargetSubDirectory: $TargetSubDirectory"
+if ($Source) { Write-Host "Source: $Source" }
+if ($Link) { Write-Host "Link: $Link" }
+if ($TargetSubDirectory) { Write-Host "TargetSubDirectory: $TargetSubDirectory" }
 Write-Host "Restore: $Restore"
-Write-Host "Link: $Link"
+Write-Host "Relink: $Relink"
 Write-Host "Clean: $Clean"
 Write-Host "DryRun: $DryRun"
 Write-Host "WorkingDirectory: $WorkingDirectory"
+Write-Host "-----------------------------"
 Write-Host "Press Enter to exit..."
 Read-Host | Out-Null
